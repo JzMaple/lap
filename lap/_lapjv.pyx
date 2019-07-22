@@ -15,6 +15,7 @@ cdef extern from "lapjv.h" nogil:
         FP_2
         FP_DYNAMIC
     int lapjv_internal(
+            const uint_t n_batch,
             const uint_t n,
             double *cost[],
             int_t *x,
@@ -67,13 +68,14 @@ def lapjv(cnp.ndarray cost not None, char extend_cost=False,
     low enough, there will be unmatched rows, columns in the solution `x`, `y`.
     All such entries are set to -1.
     """
-    if cost.ndim != 2:
-        raise ValueError('2-dimensional array expected')
-    cdef cnp.ndarray[cnp.double_t, ndim=2, mode='c'] cost_c = \
+    if cost.ndim != 3:
+        raise ValueError('3-dimensional array expected')
+    cdef cnp.ndarray[cnp.double_t, ndim=3, mode='c'] cost_c = \
         np.ascontiguousarray(cost, dtype=np.double)
-    cdef cnp.ndarray[cnp.double_t, ndim=2, mode='c'] cost_c_extended
-    cdef uint_t n_rows = cost_c.shape[0]
-    cdef uint_t n_cols = cost_c.shape[1]
+    cdef cnp.ndarray[cnp.double_t, ndim=3, mode='c'] cost_c_extended
+    cdef uint_t n_batch = cost_c.shape[0]
+    cdef uint_t n_rows = cost_c.shape[1]
+    cdef uint_t n_cols = cost_c.shape[2]
     cdef uint_t n = 0
     if n_rows == n_cols:
         n = n_rows
@@ -84,27 +86,29 @@ def lapjv(cnp.ndarray cost not None, char extend_cost=False,
                     'non-square, pass extend_cost=True.')
     if extend_cost or cost_limit < np.inf:
         n = n_rows + n_cols
-        cost_c_extended = np.empty((n, n), dtype=np.double)
+        cost_c_extended = np.empty((n_batch, n, n), dtype=np.double)
         if cost_limit < np.inf:
             cost_c_extended[:] = cost_limit / 2.
         else:
             cost_c_extended[:] = cost_c.max() + 1
-        cost_c_extended[n_rows:, n_cols:] = 0
-        cost_c_extended[:n_rows, :n_cols] = cost_c
+        cost_c_extended[:, n_rows:, n_cols:] = 0
+        cost_c_extended[:, :n_rows, :n_cols] = cost_c
         cost_c = cost_c_extended
 
     cdef double **cost_ptr
-    cost_ptr = <double **> malloc(n * sizeof(double *))
+    cost_ptr = <double **> malloc(n_batch * n * sizeof(double *))
     cdef int i
-    for i in range(n):
-        cost_ptr[i] = &cost_c[i, 0]
+    cdef int j
+    for i in range(n_batch):
+        for j in range(n):
+            cost_ptr[i * n + j] = &cost_c[i, j, 0]
 
     cdef cnp.ndarray[int_t, ndim=1, mode='c'] x_c = \
-        np.empty((n,), dtype=np.int32)
+        np.empty((n * n_batch,), dtype=np.int32)
     cdef cnp.ndarray[int_t, ndim=1, mode='c'] y_c = \
-        np.empty((n,), dtype=np.int32)
+        np.empty((n * n_batch,), dtype=np.int32)
 
-    cdef int ret = lapjv_internal(n, cost_ptr, &x_c[0], &y_c[0])
+    cdef int ret = lapjv_internal(n_batch, n, cost_ptr, &x_c[0], &y_c[0])
     free(cost_ptr)
     if ret != 0:
         if ret == -1:
@@ -112,16 +116,19 @@ def lapjv(cnp.ndarray cost not None, char extend_cost=False,
         raise RuntimeError('Unknown error (lapjv_internal returned %d).' % ret)
 
 
-    cdef double opt = np.nan
+    cdef cnp.ndarray[cnp.double_t, ndim=1, mode='c'] opt = \
+        np.empty((n_batch), dtype=np.double)
     if n != n_rows:
         x_c[x_c >= n_cols] = -1
         y_c[y_c >= n_rows] = -1
-        x_c = x_c[:n_rows]
-        y_c = y_c[:n_cols]
         if return_cost:
-            opt = cost_c[np.nonzero(x_c != -1)[0], x_c[x_c != -1]].sum()
+            for i in range(n_batch):
+                x_c[i * n + n_rows : i * n + n] = -1
+                y_c[i * n + n_cols : i * n + n] = -1
+                opt[i] = cost_c[i * np.ones(np.sum(x_c[i * n : i * n + n_rows] != -1), dtype=np.uint8), np.nonzero(x_c[i * n : i * n + n_rows] != -1)[0], x_c[i * n : i * n + n_rows][x_c[i * n : i * n + n_rows] != -1]].sum()
     elif return_cost:
-        opt = cost_c[np.arange(n_rows), x_c].sum()
+        for i in range(n_batch):
+            opt[i] = cost_c[i * np.ones(n_rows, dtype=np.uint8), np.arange(n_rows), x_c[i * n_rows : (i + 1) * n_rows]].sum()
 
     if return_cost:
         return opt, x_c, y_c

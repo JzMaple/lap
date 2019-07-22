@@ -313,7 +313,7 @@ int_t _ca_dense(
 /** Solve dense sparse LAP.
  */
 int lapjv_internal(
-    const uint_t n, cost_t *cost[],
+    const uint_t n_batch, const uint_t n, cost_t *cost[],
     int_t *x, int_t *y)
 {
     int ret;
@@ -322,14 +322,16 @@ int lapjv_internal(
 
     NEW(free_rows, int_t, n);
     NEW(v, cost_t, n);
-    ret = _ccrrt_dense(n, cost, free_rows, x, y, v);
-    int i = 0;
-    while (ret > 0 && i < 2) {
-        ret = _carr_dense(n, cost, ret, free_rows, x, y, v);
-        i++;
-    }
-    if (ret > 0) {
-        ret = _ca_dense(n, cost, ret, free_rows, x, y, v);
+    for (int batch = 0; batch < n_batch; batch++) {
+        ret = _ccrrt_dense(n, cost + batch * n, free_rows, x + batch * n, y + batch * n, v);
+        int i = 0;
+        while (ret > 0 && i < 2) {
+            ret = _carr_dense(n, cost + batch * n, ret, free_rows, x + batch * n, y + batch * n, v);
+            i++;
+        }
+        if (ret > 0) {
+            ret = _ca_dense(n, cost + batch * n, ret, free_rows, x + batch * n, y + batch * n, v);
+        }
     }
     FREE(v);
     FREE(free_rows);
